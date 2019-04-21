@@ -6,6 +6,7 @@ import re
 import sys
 import logging
 import config
+import json
 
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(name)s: %(message)s', level=logging.INFO)
 logger = logging.getLogger('hallon-scrape')
@@ -18,20 +19,25 @@ class Hallon(object):
         self.username = username
         self.password = password
 
-        self.login_url = 'https://www.hallon.se/logga-in'
+        self.start_url = 'https://www.hallon.se/logga-in'
+        self.login_url = 'https://www.hallon.se/api/login/username'
         self.mypages_url = 'https://www.hallon.se/mina-sidor'
 
     def connect(self):
         with requests.Session() as s:
-            r = s.get(self.login_url)
+            r = s.get(self.start_url)
             reqvertoken = re.search(r'<.*token.*value=\"(.+)\"\s/>\s{3,}.*', r.text, re.I)
             logger.debug('Token is {0}'.format(reqvertoken.group(1)))
+            headers = {
+                'Content-Type': 'application/json',
+                'VerificationToken': reqvertoken.group(1)
+            }
             payload = {
-                'UserName': self.username,
-                'Password': self.password,
-                '__RequestVerificationToken': reqvertoken.group(1)
-                }
-            s.post(self.login_url, data=payload)
+                'username': self.username,
+                'password': self.password,
+                'rememberMe': False
+            }
+            s.post(self.login_url, data=json.dumps(payload), headers=headers)
             r = s.get(self.mypages_url)
         return r.content
 
@@ -39,36 +45,46 @@ class Hallon(object):
         data = self.connect()
         return data
 
-    def _format_output(self, subscription, phonenumber, articles):
-        formatted = []
-        for article in articles:
-            if article.startswith(' '):
-                formatted.append(article + '\n')
-            else:
-                formatted.append(article)
-        formatted.append(' GB data\n')
+    def _format_output(self, subscription, phonenumber, elements):
+        
+        (callsmade, smssent, dataleft) = elements
+
         print('Nummer: {0} ({1})'.format(phonenumber, subscription))
         print('Saldo:')
         print(6 * '-')
-        print(''.join(formatted))
+        print('{} samtal gjorda'.format(callsmade))
+        print('{} sms/mms skickade'.format(smssent))
+        print('{} GB kvarvarande surf'.format(dataleft))
 
     def get_all_info(self):
         data = self._get_data()
         tree = html.fromstring(data)
-        subscriptions = tree.xpath('//dd[@class="listitem"]')
+        subscriptions = tree.xpath('//li[@class="myNumbers__list-item js-list-item"]')
+
         for subscription in subscriptions:
-            ss = subscription.attrib['data-value']
-            phonenumber = tree.xpath('//dd[@data-value="{0}"]/span[@class="phonenumber"]/text()'.format(ss))[0]
-            articles = tree.xpath('//article[@class="whitebox myPott" and @data-filter="{0}"]/section/p//text() | //article[@class="whitebox myPott" and @data-filter="{0}"]/section/div/p//text()'.format(ss))
-            self._format_output(ss, phonenumber, articles)
+            phonenumber = subscription.xpath('.//span[@class="myNumbers__list-item-title-number"]/text()')[0]
+            mypott = subscription.xpath('.//article[@class="myPott"]')
+            for pott in mypott:
+                subscriptionid = pott.attrib['data-filter']
+                elems = pott.xpath('.//span[@class="amountused"]//text()')
+            
+            self._format_output(subscriptionid, phonenumber, elems)
 
     def get_info(self, phonenumber):
         data = self._get_data()
         tree = html.fromstring(data)
-        subscription = tree.xpath('//*[.="{0}"]/parent::dd'.format(phonenumber))[0]
-        ss = subscription.attrib['data-value']
-        articles = tree.xpath('//article[@class="whitebox myPott" and @data-filter="{0}"]/section/p//text() | //article[@class="whitebox myPott" and @data-filter="{0}"]/section/div/p//text()'.format(ss))
-        self._format_output(ss, phonenumber, articles)
+        try:
+            subscription = tree.xpath('//*[.="{0}"]/../../..'.format(phonenumber))[0]
+        except IndexError:
+            print('{} kunde inte hittas.'.format(phonenumber))
+            sys.exit(2)
+        
+        mypott = subscription.xpath('.//article[@class="myPott"]')
+        for pott in mypott:
+            subscriptionid = pott.attrib['data-filter']
+            elems = pott.xpath('.//span[@class="amountused"]//text()')
+        
+        self._format_output(subscriptionid, phonenumber, elems)
 
 
 def main():
